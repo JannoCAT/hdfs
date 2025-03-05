@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,31 +16,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const abcException = "org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException"
-
-func appendIgnoreABC(t *testing.T, client *Client, path string) (*FileWriter, error) {
-	// This represents a bug in the HDFS append implementation, as far as I can
-	// tell. Try a few times again, then skip the test.
-	retries := 0
-	for {
-		fw, err := client.Append(path)
-
-		if pathErr, ok := err.(*os.PathError); ok {
-			if nnErr, ok := pathErr.Err.(Error); ok && nnErr.Exception() == abcException {
-				t.Log("Ignoring AlreadyBeingCreatedException from append")
-
-				if retries < 3 {
-					retries += 1
-					continue
-				} else {
-					t.Skip("skipping Append test because of repeated AlreadyBeingCreatedException")
-					return fw, nil
-				}
-			}
+func assertClose(t *testing.T, w *FileWriter) {
+	var err error
+	for i := 0; i < 5; i++ {
+		err = w.Close()
+		if IsErrReplicating(err) {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		} else {
+			break
 		}
-
-		return fw, err
 	}
+
+	assert.NoError(t, err)
+}
+
+func ignoreErrReplicating(t *testing.T, err error) {
+	if IsErrReplicating(err) {
+		return
+	}
+
+	require.NoError(t, err)
 }
 
 func TestFileWrite(t *testing.T) {
@@ -55,9 +53,7 @@ func TestFileWrite(t *testing.T) {
 	n, err = writer.Write([]byte("bar"))
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/1.txt")
 	require.NoError(t, err)
@@ -88,9 +84,7 @@ func TestFileWriteLeaseRenewal(t *testing.T) {
 	n, err = writer.Write([]byte("bar"))
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/1.txt")
 	require.NoError(t, err)
@@ -113,9 +107,7 @@ func TestFileBigWrite(t *testing.T) {
 	n, err := io.Copy(writer, mobydick)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1257276, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/2.txt")
 	require.NoError(t, err)
@@ -140,9 +132,7 @@ func TestFileBigWriteMultipleBlocks(t *testing.T) {
 	n, err := io.Copy(writer, mobydick)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1257276, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/3.txt")
 	require.NoError(t, err)
@@ -167,9 +157,7 @@ func TestFileBigWriteWeirdBlockSize(t *testing.T) {
 	n, err := io.Copy(writer, mobydick)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1257276, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/4.txt")
 	require.NoError(t, err)
@@ -194,9 +182,7 @@ func TestFileBigWriteReplication(t *testing.T) {
 	n, err := io.Copy(writer, mobydick)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1257276, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/5.txt")
 	require.NoError(t, err)
@@ -240,9 +226,7 @@ func TestFileWriteSmallFlushes(t *testing.T) {
 	n, err = writer.Write([]byte(s))
 	require.NoError(t, err, "final write of %d bytes", len(s))
 	assert.Equal(t, len(s), n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/create/6.txt")
 	require.NoError(t, err)
@@ -259,7 +243,7 @@ func TestCreateEmptyFile(t *testing.T) {
 	baleet(t, "/_test/emptyfile")
 
 	err := client.CreateEmptyFile("/_test/emptyfile")
-	require.NoError(t, err)
+	ignoreErrReplicating(t, err)
 
 	fi, err := client.Stat("/_test/emptyfile")
 	require.NoError(t, err)
@@ -268,6 +252,40 @@ func TestCreateEmptyFile(t *testing.T) {
 
 	err = client.CreateEmptyFile("/_test/emptyfile")
 	assertPathError(t, err, "create", "/_test/emptyfile", os.ErrExist)
+}
+
+func TestCreateFileAlreadyExistsException(t *testing.T) {
+	const filePath = "/_test/create/already_exists.txt"
+
+	baleet(t, "/_test/create/being_created_file")
+	mkdirp(t, filepath.Dir(filePath))
+
+	client := getClient(t)
+
+	f, err := client.CreateFile(filePath, 1, 1048576, 0755)
+	require.NoError(t, err)
+	assertClose(t, f)
+
+	_, err = client.CreateFile(filePath, 1, 1048576, 0755)
+	assertPathError(t, err, "create", filePath, os.ErrExist) // org.apache.hadoop.fs.FileAlreadyExistsException is received from HDFS
+}
+
+func TestCreateFileAlreadyBeingCreatedException(t *testing.T) {
+	const filePath = "/_test/create/being_created.txt"
+
+	baleet(t, "/_test/create/being_created_file")
+	mkdirp(t, filepath.Dir(filePath))
+
+	client := getClient(t)
+
+	f, err := client.CreateFile(filePath, 1, 1048576, 0755)
+	require.NoError(t, err)
+	defer func() {
+		assertClose(t, f)
+	}()
+
+	_, err = client.CreateFile(filePath, 1, 1048576, 0755)
+	assertPathError(t, err, "create", filePath, os.ErrExist) // org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException is received from HDFS
 }
 
 func TestCreateEmptyFileWithoutParent(t *testing.T) {
@@ -305,11 +323,9 @@ func TestFileAppend(t *testing.T) {
 	n, err := writer.Write([]byte("foobar\n"))
 	require.NoError(t, err)
 	assert.Equal(t, 7, n)
+	assertClose(t, writer)
 
-	err = writer.Close()
-	require.NoError(t, err)
-
-	writer, err = appendIgnoreABC(t, client, "/_test/append/1.txt")
+	writer, err = client.Append("/_test/append/1.txt")
 	require.NoError(t, err)
 
 	n, err = writer.Write([]byte("foo"))
@@ -319,9 +335,7 @@ func TestFileAppend(t *testing.T) {
 	n, err = writer.Write([]byte("baz"))
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/append/1.txt")
 	require.NoError(t, err)
@@ -336,9 +350,9 @@ func TestFileAppendEmptyFile(t *testing.T) {
 
 	mkdirp(t, "/_test/append")
 	err := client.CreateEmptyFile("/_test/append/2.txt")
-	require.NoError(t, err)
+	ignoreErrReplicating(t, err)
 
-	writer, err := appendIgnoreABC(t, client, "/_test/append/2.txt")
+	writer, err := client.Append("/_test/append/2.txt")
 	require.NoError(t, err)
 
 	n, err := writer.Write([]byte("foo"))
@@ -348,9 +362,7 @@ func TestFileAppendEmptyFile(t *testing.T) {
 	n, err = writer.Write([]byte("bar"))
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/append/2.txt")
 	require.NoError(t, err)
@@ -374,19 +386,15 @@ func TestFileAppendLastBlockFull(t *testing.T) {
 	wn, err := io.CopyN(writer, mobydick, 1048576)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1048576, wn)
+	assertClose(t, writer)
 
-	err = writer.Close()
-	require.NoError(t, err)
-
-	writer, err = appendIgnoreABC(t, client, "/_test/append/3.txt")
+	writer, err = client.Append("/_test/append/3.txt")
 	require.NoError(t, err)
 
 	n, err := writer.Write([]byte("\nfoo"))
 	require.NoError(t, err)
 	assert.Equal(t, 4, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	reader, err := client.Open("/_test/append/3.txt")
 	require.NoError(t, err)
@@ -414,13 +422,11 @@ func TestFileAppendRepeatedly(t *testing.T) {
 	n, err := writer.Write([]byte("foo"))
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-
-	err = writer.Close()
-	require.NoError(t, err)
+	assertClose(t, writer)
 
 	expected := "foo"
 	for i := 0; i < 20; i++ {
-		writer, err = appendIgnoreABC(t, client, "/_test/append/4.txt")
+		writer, err = client.Append("/_test/append/4.txt")
 		require.NoError(t, err)
 
 		s := strings.Repeat("b", rand.Intn(1024)) + "\n"
@@ -487,11 +493,9 @@ func TestFileAppendDeadline(t *testing.T) {
 	n, err := writer.Write([]byte("foobar\n"))
 	require.NoError(t, err)
 	assert.Equal(t, 7, n)
+	assertClose(t, writer)
 
-	err = writer.Close()
-	require.NoError(t, err)
-
-	writer, err = appendIgnoreABC(t, client, "/_test/append/5.txt")
+	writer, err = client.Append("/_test/append/5.txt")
 	require.NoError(t, err)
 
 	writer.SetDeadline(time.Now().Add(100 * time.Millisecond))
@@ -519,14 +523,133 @@ func TestFileAppendDeadlineBefore(t *testing.T) {
 	n, err := writer.Write([]byte("foobar\n"))
 	require.NoError(t, err)
 	assert.Equal(t, 7, n)
+	assertClose(t, writer)
 
-	err = writer.Close()
-	require.NoError(t, err)
-
-	writer, err = appendIgnoreABC(t, client, "/_test/append/6.txt")
+	writer, err = client.Append("/_test/append/6.txt")
 	require.NoError(t, err)
 
 	writer.SetDeadline(time.Now())
 	_, err = writer.Write([]byte("foo\n"))
 	assert.Error(t, err)
+}
+
+func skipWithoutEncryptedZone(t *testing.T) {
+	if os.Getenv("TRANSPARENT_ENCRYPTION") != "true" {
+		t.Skip("Skipping, this test requires encryption zone to make sense")
+	}
+}
+
+func TestEncryptedZoneWriteChunks(t *testing.T) {
+	skipWithoutEncryptedZone(t)
+
+	originalText := []byte("some random plain text, nice to have it quite long")
+	client := getClient(t)
+	writer, err := client.Create("/_test/kms/write_chunks.txt")
+	require.NoError(t, err)
+
+	var pos int64 = 0
+	for _, x := range []int{5, 7, 6, 4, 28} {
+		_, err = writer.Write(originalText[pos : pos+int64(x)])
+		require.NoError(t, err)
+		pos += int64(x)
+	}
+	assertClose(t, writer)
+
+	reader, err := client.Open("/_test/kms/write_chunks.txt")
+	require.NoError(t, err)
+
+	bytes, err := ioutil.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, originalText, bytes)
+
+	hdfsOut, err := exec.Command("hadoop", "dfs", "-cat", "/_test/kms/write_chunks.txt").Output()
+	require.NoError(t, err)
+	assert.Equal(t, originalText, hdfsOut)
+}
+
+func TestEncryptedZoneAppendChunks(t *testing.T) {
+	skipWithoutEncryptedZone(t)
+
+	originalText := []byte("some random plain text, nice to have it quite long")
+	client := getClient(t)
+	writer, err := client.Create("/_test/kms/append_chunks.txt")
+	require.NoError(t, err)
+	assertClose(t, writer)
+
+	var pos int64 = 0
+	for _, x := range []int{5, 7, 6, 4, 28} {
+		writer, err := client.Append("/_test/kms/append_chunks.txt")
+		require.NoError(t, err)
+		_, err = writer.Write(originalText[pos : pos+int64(x)])
+		require.NoError(t, err)
+		pos += int64(x)
+		assertClose(t, writer)
+	}
+
+	reader, err := client.Open("/_test/kms/append_chunks.txt")
+	require.NoError(t, err)
+	bytes, err := ioutil.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, originalText, bytes)
+
+	hdfsOut, err := exec.Command("hadoop", "dfs", "-cat", "/_test/kms/append_chunks.txt").Output()
+	require.NoError(t, err)
+	assert.Equal(t, originalText, hdfsOut)
+}
+
+func TestEncryptedZoneLargeBlock(t *testing.T) {
+	skipWithoutEncryptedZone(t)
+
+	// Generate quite large data block, so we can trigger encryption in chunks.
+	mobydick, err := os.Open("testdata/mobydick.txt")
+	require.NoError(t, err)
+	originalText, err := ioutil.ReadAll(mobydick)
+	require.NoError(t, err)
+	client := getClient(t)
+
+	// Create file with small (128Kb) block size, so encrypted chunk will be placed over multiple hdfs blocks.
+	writer, err := client.CreateFile("/_test/kms/mobydick.unittest", 1, 131072, 0755)
+	require.NoError(t, err)
+
+	_, err = writer.Write(originalText)
+	require.NoError(t, err)
+	assertClose(t, writer)
+
+	reader, err := client.Open("/_test/kms/mobydick.unittest")
+	require.NoError(t, err)
+	bytes, err := ioutil.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, originalText, bytes)
+
+	// Ensure read after seek works as expected:
+	_, err = reader.Seek(35657, io.SeekStart)
+	require.NoError(t, err)
+	bytes = make([]byte, 64)
+	_, err = reader.Read(bytes)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("By reason of these things, then, the whaling voyage was welcome;"), bytes)
+
+	hdfsOut, err := exec.Command("hadoop", "dfs", "-cat", "/_test/kms/mobydick.unittest").Output()
+	require.NoError(t, err)
+	assert.Equal(t, originalText, hdfsOut)
+}
+
+func TestEncryptedZoneReadAfterJava(t *testing.T) {
+	skipWithoutEncryptedZone(t)
+
+	err := exec.Command("hadoop", "dfs", "-copyFromLocal", "testdata/mobydick.txt", "/_test/kms/mobydick.java").Run()
+	require.NoError(t, err)
+
+	mobydick, err := os.Open("testdata/mobydick.txt")
+	require.NoError(t, err)
+	originalText, err := ioutil.ReadAll(mobydick)
+	require.NoError(t, err)
+
+	client := getClient(t)
+	reader, err := client.Open("/_test/kms/mobydick.java")
+	require.NoError(t, err)
+	bytes, err := ioutil.ReadAll(reader)
+	require.NoError(t, err)
+
+	assert.Equal(t, originalText, bytes)
 }

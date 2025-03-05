@@ -1,6 +1,7 @@
 package hdfs
 
 import (
+	"crypto/cipher"
 	"crypto/md5"
 	"errors"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 
 	hdfs "github.com/colinmarc/hdfs/v2/internal/protocol/hadoop_hdfs"
 	"github.com/colinmarc/hdfs/v2/internal/transfer"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // A FileReader represents an existing file or directory in HDFS. It implements
@@ -29,6 +30,17 @@ type FileReader struct {
 	readdirLast string
 
 	closed bool
+
+	// encryption
+	enc *transparentEncryptionInfo
+}
+
+// A transparentEncryptionInfo is a key and iv to encrypt or decrypt file data
+type transparentEncryptionInfo struct {
+	key    []byte
+	iv     []byte
+	cipher cipher.Block
+	stream cipher.Stream
 }
 
 // Open returns an FileReader which can be used for reading.
@@ -38,11 +50,25 @@ func (c *Client) Open(name string) (*FileReader, error) {
 		return nil, &os.PathError{"open", name, interpretException(err)}
 	}
 
+	status, ok := info.Sys().(*FileStatus)
+	if !ok {
+		return nil, &os.PathError{"open", name, errors.New("internal error: fail to access file status")}
+	}
+
+	var enc *transparentEncryptionInfo
+	if status.FileEncryptionInfo != nil {
+		enc, err = c.kmsGetKey(status.FileEncryptionInfo)
+		if err != nil {
+			return nil, &os.PathError{"open", name, err}
+		}
+	}
+
 	return &FileReader{
 		client: c,
 		name:   name,
 		info:   info,
 		closed: false,
+		enc:    enc,
 	}, nil
 }
 
@@ -141,13 +167,14 @@ func (f *FileReader) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	var off int64
-	if whence == 0 {
+	switch whence {
+	case io.SeekStart:
 		off = offset
-	} else if whence == 1 {
+	case io.SeekCurrent:
 		off = f.offset + offset
-	} else if whence == 2 {
+	case io.SeekEnd:
 		off = f.info.Size() + offset
-	} else {
+	default:
 		return f.offset, fmt.Errorf("invalid whence: %d", whence)
 	}
 
@@ -157,11 +184,29 @@ func (f *FileReader) Seek(offset int64, whence int) (int64, error) {
 
 	if f.offset != off {
 		f.offset = off
+
+		// To make things simpler, we just destroy cipher.Stream (if any)
+		// It will be recreated in Read()
+		if f.enc != nil {
+			f.enc.stream = nil
+		}
+
 		if f.blockReader != nil {
+			// If the seek is within the next few chunks, it's much more
+			// efficient to throw away a few bytes than to reconnect and start
+			// a read at the new offset.
+			err := f.blockReader.Skip(f.offset - f.blockReader.Offset)
+			if err == nil {
+				return f.offset, nil
+			}
+
+			// It isn't possible to seek within the current block, so reset such
+			// that we can connect to the new block.
 			f.blockReader.Close()
 			f.blockReader = nil
 		}
 	}
+
 	return f.offset, nil
 }
 
@@ -202,7 +247,21 @@ func (f *FileReader) Read(b []byte) (int, error) {
 			}
 		}
 
-		n, err := f.blockReader.Read(b)
+		var n int
+		var err error
+
+		if f.enc != nil {
+			if f.enc.stream == nil {
+				f.enc.stream, err = aesCreateCTRStream(f.offset, f.enc)
+				if err != nil {
+					return 0, err
+				}
+			}
+			n, err = cipher.StreamReader{S: f.enc.stream, R: f.blockReader}.Read(b)
+		} else {
+			n, err = f.blockReader.Read(b)
+		}
+
 		f.offset += int64(n)
 
 		if err != nil && err != io.EOF {
