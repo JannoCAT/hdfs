@@ -58,7 +58,7 @@ func (c *Client) fetchDefaults() (*hdfs.FsServerDefaultsProto, error) {
 
 	if c.defaults.GetKeyProviderUri() == "" {
 		defaultKeyProviderUri := os.Getenv("DEFAULT_KEY_PROVIDER_URI")
-		c.defaults.KeyProviderUri = $defaultKeyProviderUri
+		c.defaults.KeyProviderUri = &defaultKeyProviderUri
 	} else {
 		fmt.Printf("KeyProviderUri: %s\n", c.defaults.GetProviderUri())
 	}
