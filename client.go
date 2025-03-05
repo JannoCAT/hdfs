@@ -158,7 +158,7 @@ func ClientOptionsFromConf(conf hadoopconf.HadoopConf) ClientOptions {
 	}
 
 	if conf["dfs.encryption.key.provider.uri"] != "" {
-		options.KerberosServicePrincipleName = conf["dfs.encryption.key.provider.uri"]
+		options.KeyProviderUri = conf["dfs.encryption.key.provider.uri"]
 	}
 
 	// Note that we take the highest setting, rather than allowing a range of
