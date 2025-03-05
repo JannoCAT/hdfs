@@ -15,7 +15,7 @@ import (
 
 	"github.com/pkg/errors"
 
-	hdfs "github.com/colinmarc/hdfs/v2/internal/protocol/hadoop_hdfs"
+	hdfs "github.com/JannoCAT/hdfs/v2/internal/protocol/hadoop_hdfs"
 	spnego "github.com/jcmturner/gokrb5/v8/spnego"
 )
 

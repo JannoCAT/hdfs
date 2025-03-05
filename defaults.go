@@ -3,7 +3,8 @@ package hdfs
 import (
 	"fmt"
 	"os"
-	hdfs "github.com/colinmarc/hdfs/v2/internal/protocol/hadoop_hdfs"
+
+	hdfs "github.com/JannoCAT/hdfs/v2/internal/protocol/hadoop_hdfs"
 )
 
 // ServerDefaults represents the filesystem configuration stored on the
@@ -62,6 +63,6 @@ func (c *Client) fetchDefaults() (*hdfs.FsServerDefaultsProto, error) {
 	} else {
 		fmt.Printf("KeyProviderUri: %s\n", c.defaults.GetKeyProviderUri())
 	}
-	
+
 	return c.defaults, nil
 }
