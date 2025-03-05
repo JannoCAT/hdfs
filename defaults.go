@@ -2,7 +2,6 @@ package hdfs
 
 import (
 	"fmt"
-	"os"
 
 	hdfs "github.com/JannoCAT/hdfs/v2/internal/protocol/hadoop_hdfs"
 )
@@ -58,7 +57,7 @@ func (c *Client) fetchDefaults() (*hdfs.FsServerDefaultsProto, error) {
 	c.defaults = resp.GetServerDefaults()
 
 	if c.defaults.GetKeyProviderUri() == "" {
-		defaultKeyProviderUri := os.Getenv("DEFAULT_KEY_PROVIDER_URI")
+		defaultKeyProviderUri := c.options.KeyProviderUri
 		c.defaults.KeyProviderUri = &defaultKeyProviderUri
 	} else {
 		fmt.Printf("KeyProviderUri: %s\n", c.defaults.GetKeyProviderUri())

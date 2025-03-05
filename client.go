@@ -85,6 +85,10 @@ type ClientOptions struct {
 	// multi-namenode setup (for example: 'nn/_HOST'). It is required if
 	// KerberosClient is provided.
 	KerberosServicePrincipleName string
+	// KeyProviderUri specifies the URI of the KMS key provider. If set, the
+	// client will use this key provider to fetch encryption keys for HDFS
+	// encryption zones.
+	KeyProviderUri string
 	// DataTransferProtection specifies whether or not authentication, data
 	// signature integrity checks, and wire encryption is required when
 	// communicating the the datanodes. A value of "authentication" implies
@@ -151,6 +155,10 @@ func ClientOptionsFromConf(conf hadoopconf.HadoopConf) ClientOptions {
 
 	if conf["dfs.namenode.kerberos.principal"] != "" {
 		options.KerberosServicePrincipleName = strings.Split(conf["dfs.namenode.kerberos.principal"], "@")[0]
+	}
+
+	if conf["dfs.encryption.key.provider.uri"] != "" {
+		options.KerberosServicePrincipleName = conf["dfs.encryption.key.provider.uri"]
 	}
 
 	// Note that we take the highest setting, rather than allowing a range of
